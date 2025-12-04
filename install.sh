@@ -84,16 +84,71 @@ check_root() {
 download_agent() {
     echo -e "${YELLOW}Downloading ServerDock agent...${NC}"
     
-    BINARY_URL="${BACKEND_URL}/agent/download/${OS}/${ARCH}"
+    # Convert WebSocket URL to HTTP URL for binary download
+    # ws://localhost:3001 -> http://localhost:3001
+    # wss://api.serverdock.com -> https://api.serverdock.com
+    HTTP_URL=$(echo "$BACKEND_URL" | sed 's|^wss\?://|http://|' | sed 's|/agent/connect$||')
+    BINARY_URL="${HTTP_URL}/api/agent/download/${OS}/${ARCH}"
     
     mkdir -p "$INSTALL_DIR"
-    curl -L -o "$INSTALL_DIR/serverdock-agent" "$BINARY_URL" || {
-        echo -e "${RED}Failed to download agent binary${NC}"
-        exit 1
-    }
     
-    chmod +x "$INSTALL_DIR/serverdock-agent"
-    echo -e "${GREEN}Agent binary downloaded${NC}"
+    # Try to download from backend
+    if curl -f -L -o "$INSTALL_DIR/serverdock-agent" "$BINARY_URL" 2>/dev/null; then
+        chmod +x "$INSTALL_DIR/serverdock-agent"
+        echo -e "${GREEN}Agent binary downloaded${NC}"
+        return 0
+    fi
+    
+    # If download fails, try to build locally
+    echo -e "${YELLOW}Download failed, attempting to build agent locally...${NC}"
+    
+    # Check if Go is installed
+    if ! command -v go &> /dev/null; then
+        echo -e "${RED}Go is not installed. Cannot build agent binary.${NC}"
+        echo -e "${YELLOW}Please install Go (https://golang.org/dl/) or ensure the backend has the binary available.${NC}"
+        exit 1
+    fi
+    
+    # Try to find agent source in common locations
+    AGENT_DIR=""
+    if [ -f "./cmd/serverdock-agent/main.go" ]; then
+        AGENT_DIR="$(pwd)"
+    elif [ -f "$(dirname "$0")/cmd/serverdock-agent/main.go" ]; then
+        AGENT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    elif [ -f "/opt/serverdock-source/agent/cmd/serverdock-agent/main.go" ]; then
+        AGENT_DIR="/opt/serverdock-source/agent"
+    fi
+    
+    if [ -z "$AGENT_DIR" ] || [ ! -f "$AGENT_DIR/cmd/serverdock-agent/main.go" ]; then
+        echo -e "${RED}Agent source code not found${NC}"
+        echo -e "${YELLOW}Please either:${NC}"
+        echo -e "  1. Build the agent binary manually and place it at: $INSTALL_DIR/serverdock-agent"
+        echo -e "  2. Ensure the backend has the binary available at: ${BINARY_URL}"
+        echo -e "  3. Run this installer from the agent source directory"
+        exit 1
+    fi
+    
+    # Build the agent
+    echo -e "${YELLOW}Building agent binary from source...${NC}"
+    cd "$AGENT_DIR" || exit 1
+    
+    # Download dependencies
+    if [ -f "go.mod" ]; then
+        echo -e "${YELLOW}Downloading Go dependencies...${NC}"
+        go mod download || {
+            echo -e "${RED}Failed to download Go dependencies${NC}"
+            exit 1
+        }
+    fi
+    
+    if go build -o "$INSTALL_DIR/serverdock-agent" ./cmd/serverdock-agent; then
+        chmod +x "$INSTALL_DIR/serverdock-agent"
+        echo -e "${GREEN}Agent binary built successfully${NC}"
+    else
+        echo -e "${RED}Failed to build agent binary${NC}"
+        echo -e "${YELLOW}Make sure Go is installed: https://golang.org/dl/${NC}"
+        exit 1
+    fi
 }
 
 # Create systemd service
