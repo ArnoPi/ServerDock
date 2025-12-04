@@ -93,10 +93,22 @@ download_agent() {
     mkdir -p "$INSTALL_DIR"
     
     # Try to download from backend
-    if curl -f -L -o "$INSTALL_DIR/serverdock-agent" "$BINARY_URL" 2>/dev/null; then
+    HTTP_CODE=$(curl -s -o "$INSTALL_DIR/serverdock-agent" -w "%{http_code}" -L "$BINARY_URL" 2>/dev/null)
+    BINARY_SIZE=$(stat -f%z "$INSTALL_DIR/serverdock-agent" 2>/dev/null || stat -c%s "$INSTALL_DIR/serverdock-agent" 2>/dev/null || echo "0")
+    
+    # Check if download was successful (HTTP 200 and binary size > 1KB)
+    if [ "$HTTP_CODE" = "200" ] && [ "$BINARY_SIZE" -gt 1024 ]; then
         chmod +x "$INSTALL_DIR/serverdock-agent"
-        echo -e "${GREEN}Agent binary downloaded${NC}"
+        echo -e "${GREEN}Agent binary downloaded (${BINARY_SIZE} bytes)${NC}"
         return 0
+    else
+        # Remove invalid download
+        rm -f "$INSTALL_DIR/serverdock-agent"
+        if [ "$HTTP_CODE" != "200" ]; then
+            echo -e "${YELLOW}Download failed (HTTP $HTTP_CODE), will try to build locally...${NC}"
+        else
+            echo -e "${YELLOW}Downloaded file too small (${BINARY_SIZE} bytes), will try to build locally...${NC}"
+        fi
     fi
     
     # If download fails, try to build locally
@@ -111,20 +123,45 @@ download_agent() {
     
     # Try to find agent source in common locations
     AGENT_DIR=""
+    
+    # Try current directory
     if [ -f "./cmd/serverdock-agent/main.go" ]; then
         AGENT_DIR="$(pwd)"
+    # Try script directory (works when script is executed directly)
     elif [ -f "$(dirname "$0")/cmd/serverdock-agent/main.go" ]; then
         AGENT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    # Try common installation locations
     elif [ -f "/opt/serverdock-source/agent/cmd/serverdock-agent/main.go" ]; then
         AGENT_DIR="/opt/serverdock-source/agent"
+    elif [ -f "/usr/local/src/serverdock/agent/cmd/serverdock-agent/main.go" ]; then
+        AGENT_DIR="/usr/local/src/serverdock/agent"
+    elif [ -f "/tmp/serverdock-agent/cmd/serverdock-agent/main.go" ]; then
+        AGENT_DIR="/tmp/serverdock-agent"
+    # Try to download source from GitHub as last resort
+    else
+        echo -e "${YELLOW}Agent source not found locally, attempting to download from GitHub...${NC}"
+        TEMP_DIR=$(mktemp -d)
+        if git clone --depth 1 https://github.com/ArnoPi/ServerDock.git "$TEMP_DIR" 2>/dev/null; then
+            if [ -f "$TEMP_DIR/agent/cmd/serverdock-agent/main.go" ]; then
+                AGENT_DIR="$TEMP_DIR/agent"
+                echo -e "${GREEN}Source code downloaded from GitHub${NC}"
+            else
+                rm -rf "$TEMP_DIR"
+            fi
+        else
+            rm -rf "$TEMP_DIR"
+        fi
     fi
     
     if [ -z "$AGENT_DIR" ] || [ ! -f "$AGENT_DIR/cmd/serverdock-agent/main.go" ]; then
         echo -e "${RED}Agent source code not found${NC}"
         echo -e "${YELLOW}Please either:${NC}"
-        echo -e "  1. Build the agent binary manually and place it at: $INSTALL_DIR/serverdock-agent"
+        echo -e "  1. Build the agent binary manually:"
+        echo -e "     cd agent && go build -o /opt/serverdock/serverdock-agent ./cmd/serverdock-agent"
         echo -e "  2. Ensure the backend has the binary available at: ${BINARY_URL}"
-        echo -e "  3. Run this installer from the agent source directory"
+        echo -e "  3. Clone the repository and run installer from agent directory:"
+        echo -e "     git clone https://github.com/ArnoPi/ServerDock.git"
+        echo -e "     cd ServerDock/agent && bash install.sh --token ... --server-id ..."
         exit 1
     fi
     
@@ -141,13 +178,29 @@ download_agent() {
         }
     fi
     
-    if go build -o "$INSTALL_DIR/serverdock-agent" ./cmd/serverdock-agent; then
+    # Build with optimizations
+    echo -e "${YELLOW}Compiling agent binary...${NC}"
+    if GOOS="$OS" GOARCH="$ARCH" go build -ldflags="-s -w" -o "$INSTALL_DIR/serverdock-agent" ./cmd/serverdock-agent; then
         chmod +x "$INSTALL_DIR/serverdock-agent"
-        echo -e "${GREEN}Agent binary built successfully${NC}"
+        
+        # Verify binary was created and is executable
+        if [ -f "$INSTALL_DIR/serverdock-agent" ] && [ -x "$INSTALL_DIR/serverdock-agent" ]; then
+            BINARY_SIZE=$(stat -f%z "$INSTALL_DIR/serverdock-agent" 2>/dev/null || stat -c%s "$INSTALL_DIR/serverdock-agent" 2>/dev/null || echo "0")
+            echo -e "${GREEN}Agent binary built successfully (${BINARY_SIZE} bytes)${NC}"
+        else
+            echo -e "${RED}Binary was created but is not executable${NC}"
+            exit 1
+        fi
     else
         echo -e "${RED}Failed to build agent binary${NC}"
         echo -e "${YELLOW}Make sure Go is installed: https://golang.org/dl/${NC}"
         exit 1
+    fi
+    
+    # Cleanup temporary directory if we cloned from GitHub
+    if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ] && [ "$AGENT_DIR" = "$TEMP_DIR/agent" ]; then
+        echo -e "${YELLOW}Cleaning up temporary files...${NC}"
+        rm -rf "$TEMP_DIR"
     fi
 }
 
